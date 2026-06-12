@@ -723,6 +723,12 @@ function getmarker(bounds) {
 
 function setEditorMarkers(bounds) {
     clearMarkers()
+    // bounds is undefined when findChangedLines() exits early due to
+    // insufficient history (e.g. on first page load), so we must guard
+    // against iterating undefined.
+    if (bounds == null) {
+        return;
+    }
     if (typeof bounds === 'number') {
         editor.session.addMarker(new Range(bounds, 0, bounds, 200), "hover", "fullLine");
     } else {
