@@ -132,6 +132,26 @@ placeholder4 *-> obj2
             indentPuml(examplePuml);
         }).not.toThrowError(RangeError, /Invalid count value/);
     });
+
+    it("should not indent keywords inside note blocks", function () {
+        const input = `@startuml
+note right
+if
+:
+fork
+end note
+@enduml`;
+
+        const result = indentPuml(input);
+
+        expect(result).toBe(`@startuml
+note right
+if
+:
+fork
+end note
+@enduml`);
+    });
 });
 
 describe("checkDiagramType", function () {
