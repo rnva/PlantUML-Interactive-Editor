@@ -65,6 +65,30 @@ function sequenceEventListeners() {
     });
 
 
+    document.getElementById('renameParticipant').addEventListener('click', async () => {
+        const element = document.getElementById('colb');
+        const svg = element.querySelector('g');
+        try {
+            const plantuml = trimlines(editor.session.getValue());
+            const response = await fetch("getParticipantName", {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    'plantuml': plantuml,
+                    'svg': svg.innerHTML,
+                    'svgelement': lastclickedsvgelement.outerHTML
+                })
+            });
+            $('#participant-name-text').val(await response.text());
+            $('#participant-name-modalForm').modal('show');
+            $('#participant-name-modalForm').on('shown.bs.modal', function() {
+                $('#participant-name-text').trigger('focus');
+            });
+        } catch (error) {
+            displayErrorMessage(`Error with fetch API: ${error.message}`, error);
+        }
+    });
+
     const sequenceList = [{
         id: 'addParticipantLeft',
         endpoint: 'addParticipant',
@@ -217,33 +241,6 @@ async function setHandlersForSequenceDiagram(pumlcontent, element) {
             }
 
             if (checkIfParticipant(svgelements, index)) {
-                svgelement.addEventListener('dblclick', async () => {
-                    lastclickedsvgelement = svgelement
-                    try {
-                        const plantuml = trimlines(editor.session.getValue());
-                        const response = await fetch("getParticipantName", {
-                            method: 'POST',
-                            headers: {
-                                'Content-Type': 'application/json'
-                            },
-                            body: JSON.stringify({
-                                'plantuml': plantuml,
-                                'svg': svg.innerHTML,
-                                'svgelement': svgelement.outerHTML
-                            })
-                        });
-                        $('#participant-name-text').val(await response.text());
-                        $('#participant-name-modalForm').modal('show');
-                        $('#participant-name-modalForm').on('shown.bs.modal', function () {
-                            $('#participant-name-text').trigger('focus');
-                        });
-
-
-                    } catch (error) {
-                        displayErrorMessage(`Error with fetch API: ${error.message}`, error);
-                    }
-                });
-
                 let rectcolor = ""
                 svgelement.addEventListener('mouseover', function() {
                     const svg = element.querySelector('g');
