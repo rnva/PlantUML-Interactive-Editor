@@ -11,8 +11,13 @@
 // path is guarded the way it is.
 const path = require('path');
 const vscode = require('vscode');
+const { initLogger, getLogger } = require('./src/logger');
 const { startSidecar, SidecarStartError } = require('./src/sidecar');
 const { getWebviewContent } = require('./src/webviewContent');
+
+// Safe to take before initLogger(): every method no-ops until activate() has
+// supplied the channel. See src/logger.js.
+const log = getLogger();
 
 const LIVE_UPDATE_DEBOUNCE_MS = 300;
 
@@ -30,7 +35,7 @@ const hoverDecoration = vscode.window.createTextEditorDecorationType({
 let sidecar;
 /** @type {Promise<import('./src/sidecar').Sidecar> | undefined} */
 let sidecarStarting;
-/** @type {vscode.OutputChannel | undefined} */
+/** @type {vscode.LogOutputChannel | undefined} */
 let outputChannel;
 /**
  * The last text document the user was editing, so the command still works when
@@ -39,8 +44,17 @@ let outputChannel;
 let lastActiveDocument;
 
 function activate(context) {
-	outputChannel = vscode.window.createOutputChannel('PlantUML Interactive');
+	// `{ log: true }` makes this a LogOutputChannel: it stamps each line with a
+	// timestamp and a level, and gives the channel its own "Set Log Level..."
+	// picker, which VS Code remembers. Without it we would be reimplementing
+	// both, plus a setting to drive them.
+	outputChannel = vscode.window.createOutputChannel('PlantUML Interactive', {
+		log: true
+	});
 	context.subscriptions.push(outputChannel);
+	initLogger(outputChannel);
+
+	log.info(`activating, version ${context.extension.packageJSON.version}`);
 
 	trackActiveDocument(context);
 
@@ -351,6 +365,7 @@ function fullRange(document) {
 }
 
 function deactivate() {
+	log.info('deactivating');
 	disposeSidecar();
 }
 
