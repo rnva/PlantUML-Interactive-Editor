@@ -28,6 +28,16 @@ With PlantUML Interactive Editor, you can:
 
 [FEATURES.md](./FEATURES.md)
 
+## VS Code extension
+
+A VS Code extension in [`plantuml-extension/`](./plantuml-extension/) provides the
+same interactive editing inside a VS Code webview, with the VS Code text editor
+standing in for the in-browser code editor. It reuses this project's frontend
+unchanged and runs the backend as a child process, so the diagram interactions
+behave identically. See [`plantuml-extension/README.md`](./plantuml-extension/README.md)
+for setup and [`docs/vscode_extension_interactivity.md`](./docs/vscode_extension_interactivity.md)
+for the design.
+
 ## Pre-requisites
 
 - Python 3.10 or newer

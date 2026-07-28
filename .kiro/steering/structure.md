@@ -7,6 +7,7 @@
 │   ├── __main__.py         # Entry point (python -m plantuml_gui)
 │   ├── __about__.py        # Version info
 │   ├── app.py              # Flask app factory, blueprint registration only
+│   ├── serve.py            # Sidecar entry point: ephemeral-port server for use as a child process (prints PLANTUML_GUI_PORT, optional token/CORS); used by the VS Code extension
 │   ├── shared/             # Shared infrastructure (used by all diagram types)
 │   │   ├── routes.py       # Shared routes (/, /render, /renderPNG, /encode, /decode, /addTitle, /getTextTitle, /editTitle, /deleteTitle)
 │   │   ├── render.py       # PlantUML JAR invocation for PNG/SVG
@@ -103,6 +104,23 @@
 │       ├── test_sequence_note_group_hover.py  # Note hover during add-mode gestures (regression: note turned black during group ghost box)
 │       ├── test_sequence_participant.py      # Participant add/rename/delete e2e tests
 │       └── test_sequence_title.py            # Double-click title editing e2e tests (shared by activity & sequence)
+├── plantuml-extension/     # VS Code extension (reuses the web app frontend in a webview)
+│   ├── extension.js        # Extension host: sidecar lifecycle, document writes, decorations, cursor reporting
+│   ├── src/
+│   │   ├── sidecar.js      # Spawns the Python backend (serve.py), port handshake, health, dispose
+│   │   ├── plantumlRenderer.js # PlantUML JAR invocation (initial read-only render path)
+│   │   └── webviewContent.js   # Builds the CSP'd webview page (a shell that loads the mirrored app)
+│   ├── media/              # Everything the webview loads
+│   │   ├── fetchShim.js    # HAND-WRITTEN: rewrites the app's relative fetch() URLs to the sidecar
+│   │   ├── editorShim.js   # HAND-WRITTEN: fake Ace `editor` backed by the VS Code document
+│   │   ├── webviewInit.js  # HAND-WRITTEN: boots the frontend in the correct load order
+│   │   ├── app/            # GENERATED from src/plantuml_gui/static (do not edit)
+│   │   ├── menus/          # GENERATED from templates/partials via Jinja (do not edit)
+│   │   └── vendor/         # GENERATED from node_modules (do not edit)
+│   ├── scripts/
+│   │   ├── sync_assets.py  # Mirrors static + menu partials + vendor libs into media/ (--check for CI)
+│   │   └── sync-assets.mjs # Finds a Python interpreter and runs sync_assets.py
+│   └── test/               # @vscode/test-cli suite (extension, sidecar, shims, webviewContent, appScripts)
 └── .kiro/steering/         # Kiro steering files
 ```
 
