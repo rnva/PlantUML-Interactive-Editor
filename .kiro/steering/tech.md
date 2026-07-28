@@ -54,6 +54,31 @@ uv run python -m pytest --cov --cov-report=html
 uv run pre-commit install -t pre-commit -t pre-push
 ```
 
+## VS Code Extension
+
+The `plantuml-extension/` sub-project is a Node/VS Code extension that reuses the
+web app frontend inside a webview and runs the Flask backend as a child process
+(`src/plantuml_gui/serve.py`).
+
+- **Node.js**: 22 (per CI); **VS Code**: `^1.125.0`
+- **Testing**: `@vscode/test-cli` / `@vscode/test-electron` (drives a real VS Code; needs a display, `xvfb` in CI)
+- **Linting**: ESLint flat config (`eslint.config.mjs`), ignoring the generated `media/app` and `media/vendor`
+- **Asset mirror**: `scripts/sync_assets.py` (run via `scripts/sync-assets.mjs`) mirrors `src/plantuml_gui/static`, the Jinja-rendered menu partials, and vendored libraries into `media/`; needs `jinja2`
+- **Vendored libs**: bootstrap, jquery, panzoom, diff (copied into `media/vendor` by the sync script)
+
+Commands (from `plantuml-extension/`):
+
+```bash
+npm ci                     # install
+npm run sync-assets        # regenerate the mirrored frontend
+npm run sync-assets:check  # fail if the mirror is stale (CI)
+npm run lint               # eslint
+npm test                   # @vscode/test-cli (needs a display)
+```
+
+CI: `.github/workflows/extension.yml` runs the mirror check, lint, and tests on
+push/PR to `main`/`summer`.
+
 ## Constraints
 
 - All Python code must pass ruff and mypy checks

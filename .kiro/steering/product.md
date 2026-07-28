@@ -18,6 +18,7 @@ Enterprise developers and technical teams (primarily at Ericsson and similar com
 - **Real-time preview**: Diagrams update instantly as you type or make changes
 - **URL-based sharing**: Share diagrams by copying the URL (diagram encoded in address bar)
 - **Bidirectional highlighting**: Hover over diagram elements to highlight code, click code to highlight elements
+- **VS Code extension**: The same interactive editing is available inside a VS Code webview (`plantuml-extension/`), with the VS Code editor standing in for the in-browser code editor
 
 ## Supported Diagram Elements
 
