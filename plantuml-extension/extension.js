@@ -150,7 +150,7 @@ function ensureSidecar() {
 
 	log.debug(`jar: ${jarPath || 'not configured'}`);
 
-	sidecarStarting = startSidecar({ jarPath, output: outputChannel })
+	sidecarStarting = startSidecar({ jarPath })
 		.then((started) => {
 			sidecar = started;
 			// A crash mid-session leaves every interaction silently failing;

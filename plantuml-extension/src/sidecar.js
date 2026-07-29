@@ -15,6 +15,10 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const vscode = require('vscode');
+const { getLogger } = require('./logger');
+
+// Safe at module load: every method no-ops until activate() supplies a channel.
+const log = getLogger().scope('sidecar');
 
 // Must match PORT_LINE_PREFIX in src/plantuml_gui/serve.py.
 const PORT_LINE_PREFIX = 'PLANTUML_GUI_PORT=';
@@ -118,7 +122,8 @@ function workspaceVenvInterpreter() {
 }
 
 /**
- * Resolve the Python interpreter to run the sidecar with.
+ * Resolve the Python interpreter to run the sidecar with, and say where it
+ * came from.
  *
  * Tried in order, most explicit first. Requiring the user to hand-configure a
  * path is the main friction in the sidecar design, so the fallbacks matter:
@@ -126,9 +131,14 @@ function workspaceVenvInterpreter() {
  * a folder, workspace-scoped settings are not read at all, and only the
  * environment variable and the last-resort name are available.
  *
- * @returns {Promise<string>} an interpreter path or bare command name.
+ * The `source` half exists for the log. Five fallbacks mean "it ran the wrong
+ * Python" is the most common way this goes wrong, and the path alone does not
+ * say which rule produced it -- so a user reporting a missing `plantuml_gui`
+ * cannot be told which knob to turn.
+ *
+ * @returns {Promise<{path: string, source: string}>}
  */
-async function resolvePythonPath() {
+async function resolvePythonSource() {
 	const configured = vscode.workspace
 		.getConfiguration('plantumlInteractive')
 		.get('pythonPath');
@@ -136,20 +146,42 @@ async function resolvePythonPath() {
 	// An explicit setting wins even if it is wrong: a clear "could not run X"
 	// beats silently running some other interpreter than the one asked for.
 	if (configured) {
-		return configured;
+		return {
+			path: /** @type {string} */ (configured),
+			source: 'the plantumlInteractive.pythonPath setting'
+		};
 	}
 
 	// Lets launch.json configure development without a workspace folder,
 	// mirroring how it already passes PLANTUML_JAR.
 	if (process.env.PLANTUML_GUI_PYTHON) {
-		return process.env.PLANTUML_GUI_PYTHON;
+		return {
+			path: process.env.PLANTUML_GUI_PYTHON,
+			source: 'the PLANTUML_GUI_PYTHON environment variable'
+		};
 	}
 
-	return (
-		(await pythonExtensionInterpreter()) ??
-		workspaceVenvInterpreter() ??
-		(process.platform === 'win32' ? 'python' : 'python3')
-	);
+	const fromExtension = await pythonExtensionInterpreter();
+	if (fromExtension) {
+		return { path: fromExtension, source: "the Python extension's selected interpreter" };
+	}
+
+	const venv = workspaceVenvInterpreter();
+	if (venv) {
+		return { path: venv, source: 'a .venv in the workspace' };
+	}
+
+	return {
+		path: process.platform === 'win32' ? 'python' : 'python3',
+		source: 'the default command on PATH (nothing else was configured)'
+	};
+}
+
+/**
+ * @returns {Promise<string>} an interpreter path or bare command name.
+ */
+async function resolvePythonPath() {
+	return (await resolvePythonSource()).path;
 }
 
 /**
@@ -176,6 +208,82 @@ function buildEnv(token, jarPath) {
 	env.PYTHONUNBUFFERED = '1';
 
 	return env;
+}
+
+/**
+ * Werkzeug's access log line, e.g.
+ * `127.0.0.1 - - [28/Jul/2026 16:02:00] "POST /editText HTTP/1.1" 200 -`.
+ * The status code is the capture.
+ */
+const ACCESS_LOG_LINE =
+	/"(?:GET|POST|PUT|DELETE|OPTIONS|HEAD|PATCH) [^"]*" (\d{3})/;
+
+/** Python traceback frames, and the header that opens one. */
+const TRACEBACK_LINE = /^(?:Traceback \(most recent call last\)|\s+File ")/;
+
+/**
+ * Choose a level for one line of the sidecar's stderr.
+ *
+ * Everything the child writes to stderr arrives here, and werkzeug logs *every
+ * request* -- so without this, one hover over the diagram buries the startup
+ * lines. Requests are per-interaction noise (`trace`), a failed request is
+ * worth seeing (`warn`), and a traceback is the thing you actually came for.
+ *
+ * @param {string} line
+ * @returns {'trace'|'info'|'warn'|'error'}
+ */
+function classifyStderrLine(line) {
+	const access = ACCESS_LOG_LINE.exec(line);
+	if (access) {
+		// 4xx/5xx here is a route failing, which the webview only ever shows as
+		// a generic error banner.
+		return Number(access[1]) >= 400 ? 'warn' : 'trace';
+	}
+
+	if (TRACEBACK_LINE.test(line)) {
+		return 'error';
+	}
+
+	// serve.py's check_jar() writes these, and they predict a later render
+	// failure that is otherwise opaque.
+	if (/^warning:/i.test(line)) {
+		return 'warn';
+	}
+
+	return 'info';
+}
+
+/**
+ * Forward the child's stderr to the log, one classified line at a time.
+ *
+ * Line-buffered because a chunk boundary can fall mid-line, which would
+ * otherwise split a traceback across two entries and defeat the classifier.
+ *
+ * @param {(line: string) => void} onLine
+ * @returns {{push: (chunk: string) => void, flush: () => void}}
+ */
+function lineSplitter(onLine) {
+	let pending = '';
+
+	return {
+		push(chunk) {
+			pending += chunk;
+			const lines = pending.split('\n');
+			pending = lines.pop() ?? '';
+			for (const line of lines) {
+				if (line.trim()) {
+					onLine(line.trimEnd());
+				}
+			}
+		},
+		/** Emit whatever arrived without a trailing newline, e.g. before an exit. */
+		flush() {
+			if (pending.trim()) {
+				onLine(pending.trimEnd());
+			}
+			pending = '';
+		}
+	};
 }
 
 /**
@@ -221,11 +329,14 @@ function describeStartFailure(pythonPath, stderr, spawnError) {
  */
 async function waitForHealthy(sidecar, deadline) {
 	let lastError;
+	let attempt = 0;
 
 	while (Date.now() < deadline) {
 		if (!sidecar.isRunning) {
 			throw new SidecarStartError('The PlantUML backend exited during startup.');
 		}
+
+		attempt += 1;
 
 		try {
 			const response = await fetch(`${sidecar.baseUrl}health`, {
@@ -239,6 +350,10 @@ async function waitForHealthy(sidecar, deadline) {
 		} catch (err) {
 			lastError = err;
 		}
+
+		// Connection-refused until the socket is serving is normal, so this is
+		// only interesting when startup is slow enough to be worth explaining.
+		log.trace(`health attempt ${attempt} not ready yet: ${lastError.message}`);
 
 		await new Promise((resolve) => setTimeout(resolve, 100));
 	}
@@ -254,17 +369,20 @@ async function waitForHealthy(sidecar, deadline) {
  *
  * @param {object} [options]
  * @param {string} [options.jarPath] absolute path to plantuml.jar
- * @param {vscode.OutputChannel} [options.output] receives sidecar stderr, so
- *   Python tracebacks are visible instead of being swallowed
  * @returns {Promise<Sidecar>}
  * @throws {SidecarStartError}
  */
 async function startSidecar(options = {}) {
-	const { jarPath, output } = options;
-	const pythonPath = await resolvePythonPath();
-	output?.appendLine(`Starting PlantUML backend with interpreter: ${pythonPath}`);
+	const { jarPath } = options;
+	const startedAt = Date.now();
+
+	const { path: pythonPath, source } = await resolvePythonSource();
+	log.info(`starting; interpreter ${pythonPath} (from ${source})`);
+
 	// Per-launch secret: this is an HTTP server on loopback, which any local
 	// process can reach, and every route rewrites the user's source.
+	// Deliberately never logged, at any level -- it is the only thing standing
+	// between another local process and write access to the user's files.
 	const token = crypto.randomBytes(24).toString('hex');
 
 	const child = spawn(pythonPath, ['-m', 'plantuml_gui.serve'], {
@@ -272,20 +390,26 @@ async function startSidecar(options = {}) {
 	});
 
 	let stderr = '';
+	const stderrLines = lineSplitter((line) => log[classifyStderrLine(line)](line));
+
 	child.stderr.setEncoding('utf-8');
 	child.stderr.on('data', (chunk) => {
 		// Cap what we retain: werkzeug logs every request here for the life of
-		// the process, so this would otherwise grow without bound.
+		// the process, so this would otherwise grow without bound. This buffer
+		// feeds describeStartFailure and is separate from the log above.
 		stderr = (stderr + chunk).slice(-8000);
-		if (output) {
-			output.append(chunk);
-		}
+		stderrLines.push(chunk);
 	});
+	// A traceback printed as the process dies usually lacks a trailing newline.
+	child.on('exit', () => stderrLines.flush());
 
 	const port = await readPortLine(child, pythonPath, () => stderr);
+	log.debug(`announced port ${port} after ${Date.now() - startedAt}ms`);
+
 	const sidecar = new Sidecar(child, port, token);
 
 	await waitForHealthy(sidecar, Date.now() + STARTUP_TIMEOUT_MS);
+	log.info(`ready on port ${port} after ${Date.now() - startedAt}ms`);
 
 	return sidecar;
 }
@@ -364,7 +488,10 @@ function readPortLine(child, pythonPath, getStderr) {
 module.exports = {
 	startSidecar,
 	resolvePythonPath,
+	resolvePythonSource,
 	buildEnv,
+	classifyStderrLine,
+	lineSplitter,
 	describeStartFailure,
 	readPortLine,
 	Sidecar,

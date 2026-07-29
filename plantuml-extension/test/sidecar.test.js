@@ -4,9 +4,12 @@ const { PassThrough } = require('stream');
 
 const {
 	buildEnv,
+	classifyStderrLine,
 	describeStartFailure,
+	lineSplitter,
 	readPortLine,
 	resolvePythonPath,
+	resolvePythonSource,
 	PORT_LINE_PREFIX
 } = require('../src/sidecar');
 
@@ -76,6 +79,108 @@ suite('sidecar: interpreter resolution', () => {
 			resolved === 'python' || resolved === 'python3' || require('fs').existsSync(resolved),
 			`unexpected interpreter: ${resolved}`
 		);
+	});
+
+	test('reports which rule chose the interpreter', async () => {
+		// Five fallbacks means "it ran the wrong Python" is the usual failure,
+		// and the path alone does not say which knob to turn.
+		process.env.PLANTUML_GUI_PYTHON = '/custom/python';
+
+		const { path, source } = await resolvePythonSource();
+
+		assert.strictEqual(path, '/custom/python');
+		assert.match(source, /PLANTUML_GUI_PYTHON/);
+	});
+
+	test('names the last-resort rule as such', async () => {
+		delete process.env.PLANTUML_GUI_PYTHON;
+
+		const { source } = await resolvePythonSource();
+
+		assert.ok(source.length > 0, 'every resolution path must name its source');
+	});
+});
+
+suite('sidecar: stderr classification', () => {
+	test('keeps werkzeug request logging out of the way', () => {
+		// The sidecar logs every request to stderr. At info this buries the
+		// startup lines after a single hover over the diagram.
+		const line =
+			'127.0.0.1 - - [28/Jul/2026 16:02:00] "POST /editText HTTP/1.1" 200 -';
+
+		assert.strictEqual(classifyStderrLine(line), 'trace');
+	});
+
+	test('promotes a failed request', () => {
+		const line =
+			'127.0.0.1 - - [28/Jul/2026 16:02:00] "POST /editText HTTP/1.1" 500 -';
+
+		assert.strictEqual(classifyStderrLine(line), 'warn');
+	});
+
+	test('surfaces a traceback as an error', () => {
+		assert.strictEqual(
+			classifyStderrLine('Traceback (most recent call last):'),
+			'error'
+		);
+		assert.strictEqual(
+			classifyStderrLine('  File "/x/routes.py", line 12, in edit'),
+			'error'
+		);
+	});
+
+	test("carries serve.py's jar warning at warn", () => {
+		// check_jar() predicts a render failure that is otherwise opaque.
+		assert.strictEqual(
+			classifyStderrLine('warning: PLANTUML_JAR is not set; rendering will fail.'),
+			'warn'
+		);
+	});
+
+	test('treats anything else as ordinary output', () => {
+		assert.strictEqual(classifyStderrLine(' * Running on http://127.0.0.1:41773'), 'info');
+	});
+});
+
+suite('sidecar: stderr line splitting', () => {
+	test('emits only complete lines', () => {
+		const seen = [];
+		const splitter = lineSplitter((line) => seen.push(line));
+
+		splitter.push('first\nsec');
+
+		assert.deepStrictEqual(seen, ['first']);
+	});
+
+	test('rejoins a line split across chunks', () => {
+		// A chunk boundary mid-traceback would otherwise defeat the classifier.
+		const seen = [];
+		const splitter = lineSplitter((line) => seen.push(line));
+
+		splitter.push('Traceback (most rec');
+		splitter.push('ent call last):\n');
+
+		assert.deepStrictEqual(seen, ['Traceback (most recent call last):']);
+	});
+
+	test('flushes a trailing line that never got a newline', () => {
+		// How a traceback printed as the process dies usually arrives.
+		const seen = [];
+		const splitter = lineSplitter((line) => seen.push(line));
+
+		splitter.push('ModuleNotFoundError: No module named plantuml_gui');
+		splitter.flush();
+
+		assert.deepStrictEqual(seen, ['ModuleNotFoundError: No module named plantuml_gui']);
+	});
+
+	test('drops blank lines', () => {
+		const seen = [];
+		const splitter = lineSplitter((line) => seen.push(line));
+
+		splitter.push('\n\n  \nreal\n');
+
+		assert.deepStrictEqual(seen, ['real']);
 	});
 });
 
