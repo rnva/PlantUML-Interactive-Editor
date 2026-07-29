@@ -258,6 +258,34 @@ async function openDiagramPanel(context) {
 	// "Failed to fetch" in the panel.
 	log.info(`panel opened, api base ${apiBase}`);
 
+	// Guard against reentrancy inside applyEdit. This is belt-and-braces: the
+	// text-equality checks on both sides are what actually terminate the loop.
+	let applyingEdit = false;
+
+	// Registered BEFORE the html is assigned, because assigning it is what
+	// starts the webview loading. Scripts in the page can post as soon as they
+	// run, and a listener attached after the assignment misses anything sent
+	// before it exists -- which is exactly the window in which a script that
+	// throws while loading would report it. Cheap to do early: the panel exists
+	// from createWebviewPanel(), the html only decides what runs inside it.
+	const messageListener = panel.webview.onDidReceiveMessage(async (message) => {
+		if (message.type === 'applyPuml') {
+			await applyPuml(document, message.text, () => applyingEdit, (v) => {
+				applyingEdit = v;
+			});
+		} else if (message.type === 'setHighlight') {
+			applyHighlight(document, message.rows);
+		} else if (message.type === 'log') {
+			webviewLog.info(message.message);
+		} else if (message.type === 'ready') {
+			webviewLog.info('frontend booted');
+		} else {
+			// Not fatal, but it means the two sides disagree about the protocol,
+			// which otherwise presents as one feature quietly doing nothing.
+			log.warn(`ignoring unknown message from the webview: ${message.type}`);
+		}
+	});
+
 	panel.webview.html = getWebviewContent({
 		apiBase,
 		token: active.token,
@@ -265,11 +293,10 @@ async function openDiagramPanel(context) {
 		mediaRoot
 	});
 
+	// Annotated because the only assignment is inside the change listener below,
+	// which defeats the implicit-any inference checkJs would otherwise do.
+	/** @type {NodeJS.Timeout | undefined} */
 	let debounceTimer;
-
-	// Guard against reentrancy inside applyEdit. This is belt-and-braces: the
-	// text-equality checks on both sides are what actually terminate the loop.
-	let applyingEdit = false;
 
 	const postDocument = () => {
 		const text = document.getText();
@@ -288,24 +315,6 @@ async function openDiagramPanel(context) {
 
 		clearTimeout(debounceTimer);
 		debounceTimer = setTimeout(postDocument, LIVE_UPDATE_DEBOUNCE_MS);
-	});
-
-	const messageListener = panel.webview.onDidReceiveMessage(async (message) => {
-		if (message.type === 'applyPuml') {
-			await applyPuml(document, message.text, () => applyingEdit, (v) => {
-				applyingEdit = v;
-			});
-		} else if (message.type === 'setHighlight') {
-			applyHighlight(document, message.rows);
-		} else if (message.type === 'log') {
-			webviewLog.info(message.message);
-		} else if (message.type === 'ready') {
-			webviewLog.info('frontend booted');
-		} else {
-			// Not fatal, but it means the two sides disagree about the protocol,
-			// which otherwise presents as one feature quietly doing nothing.
-			log.warn(`ignoring unknown message from the webview: ${message.type}`);
-		}
 	});
 
 	// Cursor -> diagram highlighting. VS Code has no per-line mouse-hover event
