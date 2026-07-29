@@ -11,8 +11,16 @@
 // path is guarded the way it is.
 const path = require('path');
 const vscode = require('vscode');
+const { initLogger, getLogger, levelFromWebview } = require('./src/logger');
 const { startSidecar, SidecarStartError } = require('./src/sidecar');
 const { getWebviewContent } = require('./src/webviewContent');
+
+// Safe to take before initLogger(): every method no-ops until activate() has
+// supplied the channel. See src/logger.js.
+const log = getLogger();
+
+/** Anything the webview reports, tagged so its origin stays obvious. */
+const webviewLog = log.scope('webview');
 
 const LIVE_UPDATE_DEBOUNCE_MS = 300;
 
@@ -30,7 +38,7 @@ const hoverDecoration = vscode.window.createTextEditorDecorationType({
 let sidecar;
 /** @type {Promise<import('./src/sidecar').Sidecar> | undefined} */
 let sidecarStarting;
-/** @type {vscode.OutputChannel | undefined} */
+/** @type {vscode.LogOutputChannel | undefined} */
 let outputChannel;
 /**
  * The last text document the user was editing, so the command still works when
@@ -39,8 +47,17 @@ let outputChannel;
 let lastActiveDocument;
 
 function activate(context) {
-	outputChannel = vscode.window.createOutputChannel('PlantUML Interactive');
+	// `{ log: true }` makes this a LogOutputChannel: it stamps each line with a
+	// timestamp and a level, and gives the channel its own "Set Log Level..."
+	// picker, which VS Code remembers. Without it we would be reimplementing
+	// both, plus a setting to drive them.
+	outputChannel = vscode.window.createOutputChannel('PlantUML Interactive', {
+		log: true
+	});
 	context.subscriptions.push(outputChannel);
+	initLogger(outputChannel);
+
+	log.info(`activating, version ${context.extension.packageJSON.version}`);
 
 	trackActiveDocument(context);
 
@@ -118,35 +135,53 @@ function resolveTargetDocument() {
  */
 function ensureSidecar() {
 	if (sidecar && sidecar.isRunning) {
+		log.debug('reusing the running sidecar');
 		return Promise.resolve(sidecar);
 	}
 
-	if (!sidecarStarting) {
-		const jarPath =
-			vscode.workspace.getConfiguration('plantumlInteractive').get('plantumlJar') ||
-			process.env.PLANTUML_JAR;
-
-		sidecarStarting = startSidecar({ jarPath, output: outputChannel })
-			.then((started) => {
-				sidecar = started;
-				// A crash mid-session leaves every interaction silently failing;
-				// clear our handle so the next open retries instead.
-				started.process.on('exit', () => {
-					if (sidecar === started) {
-						sidecar = undefined;
-					}
-				});
-				return started;
-			})
-			.finally(() => {
-				sidecarStarting = undefined;
-			});
+	if (sidecarStarting) {
+		log.debug('joining a sidecar start already in flight');
+		return sidecarStarting;
 	}
+
+	const jarPath =
+		vscode.workspace.getConfiguration('plantumlInteractive').get('plantumlJar') ||
+		process.env.PLANTUML_JAR;
+
+	log.debug(`jar: ${jarPath || 'not configured'}`);
+
+	sidecarStarting = startSidecar({ jarPath })
+		.then((started) => {
+			sidecar = started;
+			// A crash mid-session leaves every interaction silently failing;
+			// clear our handle so the next open retries instead.
+			started.process.on('exit', (code, signal) => {
+				if (sidecar === started) {
+					// Still the live handle, so nobody asked for this.
+					sidecar = undefined;
+					log.warn(
+						`sidecar exited unexpectedly (code ${code}, signal ${signal}); ` +
+							'the next open will start a new one'
+					);
+					return;
+				}
+				// disposeSidecar() clears the handle before the exit lands, so
+				// reaching here means the exit was ours.
+				log.debug(`sidecar exited (code ${code}, signal ${signal})`);
+			});
+			return started;
+		})
+		.finally(() => {
+			sidecarStarting = undefined;
+		});
 
 	return sidecarStarting;
 }
 
 function disposeSidecar() {
+	if (sidecar) {
+		log.info('stopping the sidecar');
+	}
 	sidecar?.dispose();
 	sidecar = undefined;
 }
@@ -158,9 +193,19 @@ function disposeSidecar() {
  * @param {vscode.ExtensionContext} context
  */
 async function openDiagramPanel(context) {
+	log.info('command: open interactive diagram');
+
 	const document = resolveTargetDocument();
 
 	if (!document) {
+		// Distinguishes the two ways to get here: nothing was ever focused, or
+		// what we remembered has since been closed.
+		log.warn(
+			'no target document; last remembered: ' +
+				(lastActiveDocument
+					? `${lastActiveDocument.uri.toString()} (closed)`
+					: 'none')
+		);
 		// Says what is actually wrong. The old wording ("Open a PlantUML file
 		// first") implied a file-type check that has never existed, and sent
 		// people looking at their file extension instead of at focus.
@@ -171,10 +216,15 @@ async function openDiagramPanel(context) {
 		return;
 	}
 
+	// URI and size only. The document's text is the user's file and is confined
+	// to `trace`; see the redaction rule in the design doc.
+	log.info(`target: ${document.uri.toString()} (${document.lineCount} lines)`);
+
 	let active;
 	try {
 		active = await ensureSidecar();
 	} catch (err) {
+		log.error(err);
 		vscode.window.showErrorMessage(
 			err instanceof SidecarStartError
 				? err.message
@@ -203,6 +253,42 @@ async function openDiagramPanel(context) {
 		await vscode.env.asExternalUri(vscode.Uri.parse(active.baseUrl))
 	).toString();
 
+	// Worth a line of its own: under Remote-SSH this is a tunnelled URL rather
+	// than the loopback one, and a wrong answer here shows up only as an opaque
+	// "Failed to fetch" in the panel.
+	log.info(`panel opened, api base ${apiBase}`);
+
+	// Guard against reentrancy inside applyEdit. This is belt-and-braces: the
+	// text-equality checks on both sides are what actually terminate the loop.
+	let applyingEdit = false;
+
+	// Registered BEFORE the html is assigned, because assigning it is what
+	// starts the webview loading. Scripts in the page can post as soon as they
+	// run, and a listener attached after the assignment misses anything sent
+	// before it exists -- which is exactly the window in which a script that
+	// throws while loading would report it. Cheap to do early: the panel exists
+	// from createWebviewPanel(), the html only decides what runs inside it.
+	const messageListener = panel.webview.onDidReceiveMessage(async (message) => {
+		if (message.type === 'applyPuml') {
+			await applyPuml(document, message.text, () => applyingEdit, (v) => {
+				applyingEdit = v;
+			});
+		} else if (message.type === 'setHighlight') {
+			applyHighlight(document, message.rows);
+		} else if (message.type === 'log') {
+			// levelFromWebview, not message.level directly: the webview runs the
+			// mirrored frontend, so this is untrusted input and indexing the
+			// logger with it would let that side name any method on the object.
+			webviewLog[levelFromWebview(message.level)](message.message);
+		} else if (message.type === 'ready') {
+			webviewLog.info('frontend booted');
+		} else {
+			// Not fatal, but it means the two sides disagree about the protocol,
+			// which otherwise presents as one feature quietly doing nothing.
+			log.warn(`ignoring unknown message from the webview: ${message.type}`);
+		}
+	});
+
 	panel.webview.html = getWebviewContent({
 		apiBase,
 		token: active.token,
@@ -210,17 +296,16 @@ async function openDiagramPanel(context) {
 		mediaRoot
 	});
 
+	// Annotated because the only assignment is inside the change listener below,
+	// which defeats the implicit-any inference checkJs would otherwise do.
+	/** @type {NodeJS.Timeout | undefined} */
 	let debounceTimer;
 
-	// Guard against reentrancy inside applyEdit. This is belt-and-braces: the
-	// text-equality checks on both sides are what actually terminate the loop.
-	let applyingEdit = false;
-
 	const postDocument = () => {
-		panel.webview.postMessage({
-			type: 'documentChanged',
-			text: document.getText()
-		});
+		const text = document.getText();
+		// Fires on every keystroke, debounced. `trace` or it drowns the channel.
+		log.trace(`-> documentChanged (${text.length} chars)`);
+		panel.webview.postMessage({ type: 'documentChanged', text });
 	};
 
 	// Initial state, so the webview can render and cache the current text.
@@ -235,20 +320,6 @@ async function openDiagramPanel(context) {
 		debounceTimer = setTimeout(postDocument, LIVE_UPDATE_DEBOUNCE_MS);
 	});
 
-	const messageListener = panel.webview.onDidReceiveMessage(async (message) => {
-		if (message.type === 'applyPuml') {
-			await applyPuml(document, message.text, () => applyingEdit, (v) => {
-				applyingEdit = v;
-			});
-		} else if (message.type === 'setHighlight') {
-			applyHighlight(document, message.rows);
-		} else if (message.type === 'log') {
-			outputChannel?.appendLine(`[webview] ${message.message}`);
-		} else if (message.type === 'ready') {
-			outputChannel?.appendLine('[webview] frontend loaded');
-		}
-	});
-
 	// Cursor -> diagram highlighting. VS Code has no per-line mouse-hover event
 	// for text editors, so the web app's hover direction degrades to following
 	// the caret. See the design doc, Phase 7.
@@ -257,6 +328,8 @@ async function openDiagramPanel(context) {
 			return;
 		}
 		const position = event.selections[0].active;
+		// Fires on every caret move, including selection drags.
+		log.trace(`-> cursorMoved (${position.line}:${position.character})`);
 		panel.webview.postMessage({
 			type: 'cursorMoved',
 			row: position.line,
@@ -265,6 +338,7 @@ async function openDiagramPanel(context) {
 	});
 
 	panel.onDidDispose(() => {
+		log.info('panel closed');
 		clearTimeout(debounceTimer);
 		changeListener.dispose();
 		messageListener.dispose();
@@ -290,13 +364,28 @@ async function openDiagramPanel(context) {
  * @param {(value: boolean) => void} setApplying
  */
 async function applyPuml(document, text, isApplying, setApplying) {
-	if (typeof text !== 'string' || isApplying()) {
+	if (typeof text !== 'string') {
+		log.warn(`applyPuml: ignoring a ${typeof text} payload`);
 		return;
 	}
 
-	if (text === document.getText()) {
+	if (isApplying()) {
+		log.warn('applyPuml: reentered while applying; ignored');
 		return;
 	}
+
+	const current = document.getText();
+
+	if (text === current) {
+		// The echo loop terminating, once per interaction. If this line ever
+		// starts repeating instead, the two equality checks are no longer
+		// agreeing and the loop is running away.
+		log.debug('applyPuml: matches the document already; ignored');
+		return;
+	}
+
+	log.debug(`applyPuml: applying, ${current.length} -> ${text.length} chars`);
+	log.trace(`applyPuml: new text\n${text}`);
 
 	setApplying(true);
 	try {
@@ -304,6 +393,7 @@ async function applyPuml(document, text, isApplying, setApplying) {
 		edit.replace(document.uri, fullRange(document), text);
 		const applied = await vscode.workspace.applyEdit(edit);
 		if (!applied) {
+			log.error('applyPuml: applyEdit was refused; the document is unchanged');
 			vscode.window.showErrorMessage(
 				'Could not write the diagram change into the document.'
 			);
@@ -323,9 +413,20 @@ async function applyPuml(document, text, isApplying, setApplying) {
  * @param {number[]} rows zero-based line numbers
  */
 function applyHighlight(document, rows) {
-	const ranges = (rows ?? [])
-		.filter((row) => row >= 0 && row < document.lineCount)
-		.map((row) => document.lineAt(row).range);
+	const requested = rows ?? [];
+	const inRange = requested.filter((row) => row >= 0 && row < document.lineCount);
+	const ranges = inRange.map((row) => document.lineAt(row).range);
+
+	// Fires on every mouse move over the diagram, hence `trace`. The dropped
+	// count is called out because a row the document does not have means the
+	// diagram-to-line mapping is off -- the cause behind "edits apply to the
+	// wrong line".
+	log.trace(
+		`highlight: ${inRange.length} row(s)` +
+			(inRange.length < requested.length
+				? `, ${requested.length - inRange.length} outside the document`
+				: '')
+	);
 
 	for (const editor of vscode.window.visibleTextEditors) {
 		if (editor.document === document) {
@@ -351,6 +452,7 @@ function fullRange(document) {
 }
 
 function deactivate() {
+	log.info('deactivating');
 	disposeSidecar();
 }
 

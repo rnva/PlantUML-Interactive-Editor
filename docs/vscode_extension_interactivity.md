@@ -55,9 +55,11 @@ plantuml-extension/
 ├── extension.js                 host: sidecar lifecycle, document writes,
 │                                decorations, cursor reporting
 ├── src/
+│   ├── logger.js                the log channel; levels, scopes, no vscode dep
 │   ├── sidecar.js               spawn Python, port handshake, health, dispose
 │   └── webviewContent.js        builds the webview page (a shell, no logic)
 ├── media/                       everything the webview loads
+│   ├── logShim.js               HAND-WRITTEN  webview errors -> the log
 │   ├── fetchShim.js             HAND-WRITTEN  relative URLs -> sidecar
 │   ├── editorShim.js            HAND-WRITTEN  the fake ace / editor
 │   ├── webviewInit.js           HAND-WRITTEN  boots the frontend
@@ -67,7 +69,7 @@ plantuml-extension/
 ├── scripts/
 │   ├── sync_assets.py           the mirror; --check for CI
 │   └── sync-assets.mjs          finds an interpreter, runs the above
-└── test/                        45 tests, run by @vscode/test-cli
+└── test/                        85 tests, run by @vscode/test-cli
 ```
 
 ## How one interaction flows
@@ -135,16 +137,33 @@ Break one of these and the diagram usually still renders while nothing works.
 
 ### Script load order
 
-1. `vendor/*` — jQuery before Bootstrap
-2. `fetchShim.js` — before anything calls `fetch`
-3. `editorShim.js` — **`app/script.js` dereferences `ace` at load time**, so a
+1. `logShim.js` — **first of all**: its `window.onerror` has to be installed
+   before anything that could throw has run, and it makes the one permitted
+   `acquireVsCodeApi()` call (see below)
+2. `vendor/*` — jQuery before Bootstrap
+3. `fetchShim.js` — before anything calls `fetch`
+4. `editorShim.js` — **`app/script.js` dereferences `ace` at load time**, so a
    later shim throws mid-parse
-4. `app/*.js`
-5. `webviewInit.js` — **last**: it assigns `app/script.js`'s `let editor`, a
+5. `app/*.js`
+6. `webviewInit.js` — **last**: it assigns `app/script.js`'s `let editor`, a
    global *lexical* binding that only another classic script in the same scope
    can write
 
 Asserted by tests in `test/webviewContent.test.js`.
+
+### `acquireVsCodeApi()` is called exactly once
+
+The webview API may be acquired only once per panel; a second call throws and
+takes the panel down with it. `logShim.js` makes the call and publishes the
+handle as `window.__vscodeApi`; `webviewInit.js` reads that rather than
+acquiring its own.
+
+It has to be this way round. `webviewInit.js` used to own the call, but it loads
+*last* — far too late to report a script that threw while the page was still
+loading, which is the failure the log shim exists for.
+
+Pinned by `test/logShim.test.js` and by a call counter in
+`test/appScripts.test.js`.
 
 ### `webviewInit.js` must not call two web app functions
 
@@ -363,26 +382,76 @@ Settings: `plantumlInteractive.plantumlJar`, `plantumlInteractive.pythonPath`.
 In the dev host these are not read (no workspace folder); use `launch.json`'s
 `env` with `PLANTUML_JAR` and `PLANTUML_GUI_PYTHON`.
 
+### Logging
+
+Everything the extension has to say goes to the **PlantUML Interactive** output
+channel (*View → Output*). It is a `LogOutputChannel`, so VS Code supplies the
+timestamps, the level prefixes, and a per-channel **Set Log Level…** in the
+channel's right-click menu, which it remembers between sessions.
+
+All three processes report into it, tagged by origin: unprefixed for the host,
+`[sidecar]` for the Python child, `[webview]` for the panel.
+
+#### Level policy
+
+Levels are chosen by **how often a line fires**, not by how bad it sounds. That
+is the only thing keeping the channel readable: `setHighlight` fires on every
+mouse move over the diagram and `documentChanged` on every keystroke, so at
+`info` they would bury everything else within seconds.
+
+| Level | Fires | Examples |
+|---|---|---|
+| `error` | a user-visible failure | sidecar failed to start; `applyEdit` refused; uncaught webview exception; a failed `fetch` |
+| `warn` | a recoverable oddity | sidecar exited mid-session; a 4xx/5xx from a route; unknown message type |
+| `info` | once per session | activate/deactivate; interpreter and *how it was chosen*; sidecar ready with port and timing; panel opened/closed |
+| `debug` | once per user interaction | `applyPuml` applied, or recognised as an echo; port announced |
+| `trace` | per keystroke or mouse move, plus payloads | `setHighlight`; `cursorMoved`; `documentChanged`; werkzeug's access log; **puml source** |
+
+#### What is never logged
+
+- **The sidecar token**, at any level. It is the only thing preventing another
+  local process from driving edits into the user's files.
+- **Diagram source, above `trace`.** The document is the user's file and logs
+  get pasted into bug reports, so file content is confined to a level that is
+  off unless deliberately switched on. Everything else logs shapes — lengths,
+  line counts, row indexes, URLs, status codes.
+
+#### Notes for anyone adding a line
+
+- `src/logger.js` takes an injected channel and requires nothing from `vscode`,
+  so it works in unit tests and no-ops before `activate()` has run. That is what
+  makes it safe to log at module scope.
+- A level arriving from the webview is untrusted input and goes through
+  `levelFromWebview()`. Indexing the logger with it directly would let that side
+  name any method on the object.
+- The webview does not log what it posts to the host — the host logs it on
+  arrival, and doing both doubles every line. `editorShim.js` logs only the
+  paths that stop *before* a message is sent.
+- `classifyStderrLine()` in `sidecar.js` sorts the child's stderr by line;
+  werkzeug logs every request there, so without it one hover buries the startup
+  lines.
+
 ### Debugging
 
-The **PlantUML Interactive** output channel carries the chosen interpreter, the
-sidecar's stderr including Python tracebacks, and `[webview]` messages. A script
-error in the webview shows in the red banner (`#popup`) at the top of the panel.
+A script error in the webview also shows in the red banner (`#popup`) at the top
+of the panel.
 
 Symptom-to-cause shortcuts:
 
-| Symptom | Look at |
-|---|---|
-| Diagram renders, nothing clickable | an app script threw at load; check for a missing DOM id or a load-order change |
-| Diagram never updates after an edit | the `change` listener in `webviewInit.js` |
-| `Failed to fetch` | CORS/token handling in `serve.py`, or the CSP `connect-src` |
-| Edits apply to the wrong line | a participant/message index; verify against a real render, not by reading |
-| CI says the mirror is stale | run `npm run sync-assets`; if it recurs, something is rewriting `media/` after generation |
+| Symptom | What the log says | Look at |
+|---|---|---|
+| Diagram renders, nothing clickable | `[webview] uncaught: …` with the stack | a missing DOM id or a load-order change |
+| Diagram never updates after an edit | no `applyPuml` lines at `debug` | the `change` listener in `webviewInit.js` |
+| `Failed to fetch` | `[webview] fetch: POST <route> failed: …` | CORS/token handling in `serve.py`, or the CSP `connect-src` |
+| Edits apply to the wrong line | `highlight: N row(s), M outside the document` at `trace` | a participant/message index; verify against a real render, not by reading |
+| Backend route failing | `[sidecar]` access line at `warn` with a 5xx | the traceback logged at `error` just after it |
+| Wrong Python | `[sidecar] starting; interpreter … (from …)` | the source named in that line is the knob to turn |
+| CI says the mirror is stale | — | run `npm run sync-assets`; if it recurs, something is rewriting `media/` after generation |
 
 ## Testing
 
 ```bash
-cd plantuml-extension && npm test     # 45 tests
+cd plantuml-extension && npm test     # 85 tests
 uv run pytest tests/                  # includes tests/shared/test_serve.py
 ```
 

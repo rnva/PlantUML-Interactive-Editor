@@ -112,6 +112,19 @@ suite('webview: script load order', () => {
 		assert.ok(order.indexOf('fetchShim.js') < order.indexOf('app/script.js'));
 	});
 
+	test('the log shim comes before every other script', () => {
+		// Its window.onerror has to be installed before anything that could
+		// throw has run, and it makes the single permitted acquireVsCodeApi()
+		// call that webviewInit.js reads back.
+		const order = scriptOrder(render());
+
+		assert.strictEqual(
+			order[0],
+			'logShim.js',
+			`log shim must load first, got ${order.join(', ')}`
+		);
+	});
+
 	test('the init script comes last', () => {
 		// It assigns app/script.js's `let editor` binding, which only works
 		// once every app script has been parsed.

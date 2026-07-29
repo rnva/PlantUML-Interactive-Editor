@@ -14,6 +14,17 @@
 // See docs/vscode_extension_interactivity.md, "The two shims".
 
 (function () {
+	/**
+	 * Only for things the host cannot observe for itself. Both write paths are
+	 * already logged there -- applyPuml on arrival, setHighlight on arrival --
+	 * so logging them again here would just double every line. What the host
+	 * never sees is the calls that stop *before* a message is posted, which is
+	 * exactly where the write-back loop terminates.
+	 *
+	 * @param {string} message
+	 */
+	const trace = (message) => window.__plantumlLog?.('trace', `editor: ${message}`);
+
 	/** Ace's Range, reduced to the four numbers the app code actually uses. */
 	class Range {
 		constructor(startRow, startColumn, endRow, endColumn) {
@@ -72,6 +83,10 @@
 			 */
 			setValue(next) {
 				if (next === text) {
+					// An operation ran and produced no change -- usually a
+					// backend route that matched nothing and echoed its input.
+					// Invisible to the host, which never hears about it.
+					trace(`setValue: unchanged (${next.length} chars); not posting`);
 					return;
 				}
 				text = next;
@@ -133,6 +148,10 @@
 				// The equality check that terminates the write-back loop: a
 				// change we caused arrives back with text we already have.
 				if (next === text) {
+					// The webview half of the loop guard. The host logs its own
+					// half; seeing which of the two fired says whether the edit
+					// originated in the diagram or in the editor.
+					trace('document echo recognised; not re-rendering');
 					return false;
 				}
 				text = next;
