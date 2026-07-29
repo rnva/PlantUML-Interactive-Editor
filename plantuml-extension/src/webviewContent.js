@@ -13,6 +13,9 @@ const path = require('path');
 const vscode = require('vscode');
 
 // Load order is significant:
+//   - logShim is first of all, so that its window.onerror is installed before
+//     anything that could throw has run, and so that it -- not webviewInit --
+//     makes the single permitted acquireVsCodeApi() call.
 //   - editorShim defines the global `ace` that app/script.js dereferences at
 //     load time, so it must come first.
 //   - webviewInit assigns script.js's `let editor` binding, so it must come
@@ -148,6 +151,7 @@ ${menus}
 		window.__PLANTUML_API__ = ${JSON.stringify(apiBase)};
 		window.__PLANTUML_TOKEN__ = ${JSON.stringify(token)};
 	</script>
+	<script nonce="${nonce}" src="${uri('logShim.js')}"></script>
 	<script nonce="${nonce}" src="${uri('fetchShim.js')}"></script>
 	${scripts}
 </body>

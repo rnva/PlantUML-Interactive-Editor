@@ -11,7 +11,7 @@
 // path is guarded the way it is.
 const path = require('path');
 const vscode = require('vscode');
-const { initLogger, getLogger } = require('./src/logger');
+const { initLogger, getLogger, levelFromWebview } = require('./src/logger');
 const { startSidecar, SidecarStartError } = require('./src/sidecar');
 const { getWebviewContent } = require('./src/webviewContent');
 
@@ -276,7 +276,10 @@ async function openDiagramPanel(context) {
 		} else if (message.type === 'setHighlight') {
 			applyHighlight(document, message.rows);
 		} else if (message.type === 'log') {
-			webviewLog.info(message.message);
+			// levelFromWebview, not message.level directly: the webview runs the
+			// mirrored frontend, so this is untrusted input and indexing the
+			// logger with it would let that side name any method on the object.
+			webviewLog[levelFromWebview(message.level)](message.message);
 		} else if (message.type === 'ready') {
 			webviewLog.info('frontend booted');
 		} else {

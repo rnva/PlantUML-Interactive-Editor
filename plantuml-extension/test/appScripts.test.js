@@ -88,7 +88,14 @@ function bootWebview() {
 			messageHandlers.push(handler);
 		}
 	};
-	sandbox.acquireVsCodeApi = () => ({ postMessage: (m) => posted.push(m) });
+	let acquired = 0;
+	sandbox.acquireVsCodeApi = () => {
+		// The real one throws on a second call. Counting here turns a regression
+		// into a test failure rather than a panel that dies at runtime.
+		acquired += 1;
+		assert.strictEqual(acquired, 1, 'acquireVsCodeApi must be called once');
+		return { postMessage: (m) => posted.push(m) };
+	};
 	// Record the body, not just the URL: a render is only proof of anything if
 	// it carried the *new* puml. Counting requests instead lets the boot
 	// render's own trailing fetches masquerade as a re-render.
@@ -106,6 +113,9 @@ function bootWebview() {
 	sandbox.$ = () => ({ modal() {}, hasClass: () => false, on() {}, val() {} });
 	sandbox.jQuery = sandbox.$;
 
+	// Same order the page uses. logShim is first because it owns the single
+	// acquireVsCodeApi() call that webviewInit.js reads back.
+	load(sandbox, 'logShim.js');
 	load(sandbox, 'editorShim.js');
 	for (const relative of APP_SCRIPTS) {
 		load(sandbox, relative);

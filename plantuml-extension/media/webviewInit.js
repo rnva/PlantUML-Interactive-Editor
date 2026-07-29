@@ -17,7 +17,10 @@
 // touching it.
 
 (function () {
-	const vscodeApi = acquireVsCodeApi();
+	// Not acquireVsCodeApi(): that may be called only once per webview, and
+	// media/logShim.js already made the call so it could report load-time
+	// errors from before this file ran. Calling it again here throws.
+	const vscodeApi = window.__vscodeApi;
 
 	const post = (message) => vscodeApi.postMessage(message);
 
@@ -100,5 +103,8 @@
 		window.panzoomInstance = instance;
 	}
 
+	// Reaching here means every app script parsed and the handlers are bound --
+	// the negative case is the one worth knowing about, and it arrives as an
+	// `uncaught:` line from logShim.js instead.
 	post({ type: 'ready' });
 })();
