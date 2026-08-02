@@ -8,3 +8,11 @@ vsc-extension-quickstart.md
 **/*.map
 **/eslint.config.mjs
 **/.vscode-test.*
+
+# Build tooling, not something a user of the extension runs.
+scripts/**
+
+# This file's mere existence is load-bearing: vsce falls back to .gitignore when
+# there is no .vscodeignore, and .gitignore excludes the generated media/
+# subdirectories. Because this file exists, .gitignore is not consulted and the
+# mirrored assets are packaged as they must be. Do not delete it.

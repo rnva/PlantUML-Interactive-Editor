@@ -1,65 +1,73 @@
-# plantuml-editor README
+# PlantUML Interactive Editor — VS Code extension
 
-This is the README for your extension "plantuml-editor". After writing up a brief description, we recommend including the following sections.
+Opens the interactive PlantUML diagram from
+[PlantUML-Interactive-Editor](../README.md) in a VS Code panel beside the text
+editor. The VS Code editor stays the source editor; the panel renders the
+diagram and (as the interactive work lands) lets you edit it by clicking.
 
-## Features
+## Prerequisites
 
-Describe specific features of your extension including screenshots of your extension in action. Image paths are relative to this README file.
+- **Python 3.10+** and [uv](https://docs.astral.sh/uv/) — the diagram backend is
+  the repository's Flask app, run as a child process
+- **Java** and a `plantuml.jar` — rendering shells out to it
+- **Node.js 20+** and npm
+- **VS Code 1.113** — the version on Ericsson machines, and the floor this
+  extension targets. `engines.vscode`, the pinned `@types/vscode`, and the test
+  runner's VS Code version are all aligned to it, so anything that compiles and
+  passes tests here runs on a user's machine.
 
-For example if there is an image subfolder under your extension project workspace:
+## Setup
 
-\!\[feature X\]\(images/feature-x.png\)
+From a fresh clone:
 
-> Tip: Many popular extensions utilize animations. This is an excellent way to show off your extension! We recommend short, focused animations that are easy to follow.
+```bash
+# Backend: creates .venv and installs plantuml_gui into it
+uv sync
 
-## Requirements
+# Point the renderer at your PlantUML jar
+echo 'PLANTUML_JAR="/absolute/path/to/plantuml.jar"' > .env
 
-If you have any requirements or dependencies, add a section describing those and how to install and configure them.
+# Extension: installs dev dependencies, then generates media/ (see below)
+cd plantuml-extension
+npm install
+```
 
-## Extension Settings
+Then open `plantuml-extension/` in VS Code and press **F5**. That launches an
+Extension Development Host; run **PlantUML: Open Interactive Diagram** from the
+command palette with a `.puml` file open.
 
-Include if your extension adds any VS Code settings through the `contributes.configuration` extension point.
+`.vscode/launch.json` already points `PLANTUML_GUI_PYTHON` at `../.venv/bin/python`.
+This matters because the Extension Development Host launches *without a
+workspace folder*, so workspace-scoped settings are not read at all — during
+development, the `env` block in `launch.json` is the reliable knob.
 
-For example:
+## Generated assets
 
-This extension contributes the following settings:
+`media/app`, `media/menus` and `media/vendor` are **generated and gitignored**.
+A webview can only load files from inside the extension folder, so
+`scripts/sync_assets.py` mirrors the web app's frontend out of
+`src/plantuml_gui/` (rendering the Jinja menu partials rather than copying them)
+and copies four browser libraries out of `node_modules`.
 
-* `myExtension.enable`: Enable/disable this extension.
-* `myExtension.thing`: Set to `blah` to do something.
+| When | What runs |
+|---|---|
+| `npm install` | `postinstall` regenerates `media/` (warns, does not fail, if `uv` is missing) |
+| `vsce package` | `vscode:prepublish` regenerates `media/`, and fails if it cannot |
+| After editing `src/plantuml_gui/static` or `templates/partials` | run `npm run sync-assets` yourself |
 
-## Known Issues
+`npm run sync-assets:check` reports whether your `media/` is behind its sources
+without writing anything.
 
-Calling out known issues can help limit users opening duplicate issues against your extension.
+## Settings
 
-## Release Notes
+| Setting | Purpose |
+|---|---|
+| `plantumlInteractive.plantumlJar` | Absolute path to `plantuml.jar`. Defaults to a shared install path; set it yourself, or clear it to fall back to `PLANTUML_JAR`. |
+| `plantumlInteractive.pythonPath` | Interpreter that has `plantuml-gui` installed. Required — nothing is guessed. Falls back to `PLANTUML_GUI_PYTHON`. |
 
-Users appreciate release notes as you update your extension.
+## Development
 
-### 1.0.0
-
-Initial release of ...
-
-### 1.0.1
-
-Fixed issue #.
-
-### 1.1.0
-
-Added features X, Y, and Z.
-
----
-
-## Working with Markdown
-
-You can author your README using Visual Studio Code.  Here are some useful editor keyboard shortcuts:
-
-* Split the editor (`Cmd+\` on macOS or `Ctrl+\` on Windows and Linux)
-* Toggle preview (`Shift+Cmd+V` on macOS or `Shift+Ctrl+V` on Windows and Linux)
-* Press `Ctrl+Space` (Windows, Linux, macOS) to see a list of Markdown snippets
-
-## For more information
-
-* [Visual Studio Code's Markdown Support](http://code.visualstudio.com/docs/languages/markdown)
-* [Markdown Syntax Reference](https://help.github.com/articles/markdown-basics/)
-
-**Enjoy!**
+```bash
+npm run lint     # eslint
+npm test         # downloads a VS Code build on first run, then runs test/
+```

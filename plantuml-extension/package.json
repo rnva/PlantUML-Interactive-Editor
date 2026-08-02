@@ -25,23 +25,36 @@
           "type": "string",
           "default": "/app/vbuild/tools/plantuml/1.2022.5/lib/plantuml.1.2022.5.jar",
           "description": "Absolute path to plantuml.jar, used to render diagrams. Defaults to a shared install path that is only usable on networks where it's provisioned. If you don't have access to that path, either set this to your own plantuml.jar location, or clear this setting (set it to an empty string) to use the PLANTUML_JAR environment variable instead."
+        },
+        "plantumlInteractive.pythonPath": {
+          "type": "string",
+          "default": "",
+          "description": "Python interpreter used to run the diagram-editing backend. Must have the plantuml-gui package installed. Required; see also the PLANTUML_GUI_PYTHON environment variable."
         }
       }
     }
   },
   "scripts": {
     "lint": "eslint .",
+    "sync-assets": "uv run --project .. python scripts/sync_assets.py",
+    "sync-assets:check": "uv run --project .. python scripts/sync_assets.py --check",
+    "postinstall": "npm run sync-assets || echo 'WARNING: media/ was not generated. Run npm run sync-assets before pressing F5 (needs uv and Python on PATH).' 1>&2",
+    "vscode:prepublish": "npm run sync-assets",
     "pretest": "npm run lint",
     "test": "vscode-test"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
     "@types/node": "24.x",
-    "@types/vscode": "^1.125.0",
+    "@types/vscode": "~1.110.0",
     "@vscode/test-cli": "^0.0.15",
     "@vscode/test-electron": "^3.0.0",
     "eslint": "^10.5.0",
-    "globals": "^16.5.0"
+    "globals": "^16.5.0",
+    "bootstrap": "4.6.2",
+    "diff": "^8.0.4",
+    "jquery": "3.7.1",
+    "panzoom": "9.4.0"
   },
   "overrides": {
     "diff": "^8.0.4",
