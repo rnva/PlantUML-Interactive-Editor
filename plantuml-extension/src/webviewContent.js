@@ -59,7 +59,7 @@ function readTemplate() {
  * @param {Awaited<ReturnType<import('./webviewAssets').resolveWebviewAssets>>} options.assets
  * @returns {string}
  */
-function getWebviewContent({ webview, assets }) {
+function getWebviewContent({ webview, assets, sidecar }) {
 	const nonce = crypto.randomBytes(16).toString('base64');
 
 	// Vendored Bootstrap first: the app's own stylesheet is written to override
@@ -68,11 +68,30 @@ function getWebviewContent({ webview, assets }) {
 		.map((href) => `\t<link rel="stylesheet" href="${href}">`)
 		.join('\n');
 
+	// Load order is the invariant this whole page rests on:
+	//   1. vendor      jQuery before Bootstrap, which requires it
+	//   2. shims       fetchShim before anything calls fetch; editorShim before
+	//                  script.js, which dereferences `ace` at load time (line 46)
+	//                  and would throw mid-parse if the global did not exist yet
+	//   3. app         the frontend, in dependency order
+	//   4. boot        last, because it assigns script.js's `let editor`
+	const scripts = [
+		...assets.vendorScriptUris,
+		...assets.shimUris,
+		...assets.scriptSrcs,
+		assets.bootUri
+	]
+		.map((src) => `\t<script nonce="${nonce}" src="${src}"></script>`)
+		.join('\n');
+
 	return fill(readTemplate(), {
 		csp: buildCsp({ webview, assets, nonce }),
 		nonce,
 		styleLinks,
-		menus: assets.menusHtml
+		scripts,
+		menus: assets.menusHtml,
+		apiBase: JSON.stringify(assets.base),
+		token: JSON.stringify(sidecar.token)
 	});
 }
 

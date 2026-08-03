@@ -38,9 +38,21 @@ const ASSETS = {
 	base: 'http://127.0.0.1:9999/',
 	origin: 'http://127.0.0.1:9999',
 	styleHrefs: ['http://127.0.0.1:9999/static/styles.css'],
+	scriptSrcs: [
+		'http://127.0.0.1:9999/static/script.js',
+		'http://127.0.0.1:9999/static/activity.js'
+	],
 	vendorStyleUris: ['https://file%2B.vscode-resource.test/bootstrap.min.css'],
+	vendorScriptUris: ['https://file%2B.vscode-resource.test/jquery.min.js'],
+	shimUris: [
+		'https://file%2B.vscode-resource.test/fetchShim.js',
+		'https://file%2B.vscode-resource.test/editorShim.js'
+	],
+	bootUri: 'https://file%2B.vscode-resource.test/webviewInit.js',
 	menusHtml: MENUS
 };
+
+const SIDECAR = { token: 'a-per-launch-token' };
 
 suite('webview content', () => {
 	let html;
@@ -57,7 +69,11 @@ suite('webview content', () => {
 			{ enableScripts: true, localResourceRoots: [vendorRoot(EXTENSION_PATH)] }
 		);
 		try {
-			html = getWebviewContent({ webview: panel.webview, assets: ASSETS });
+			html = getWebviewContent({
+				webview: panel.webview,
+				assets: ASSETS,
+				sidecar: SIDECAR
+			});
 		} finally {
 			panel.dispose();
 		}
@@ -95,11 +111,56 @@ suite('webview content', () => {
 		assert.ok(html.includes(MENUS), 'menu markup missing from the page');
 	});
 
-	test('supplies the diagram ids the app stylesheet targets', () => {
-		// #colb and #colb-container are the web app's own ids, which is what
-		// makes the stylesheet served by the sidecar apply here unchanged.
-		for (const id of ['colb', 'colb-container', 'error']) {
+	test('supplies every id the frontend dereferences without a null check', () => {
+		// These seven are the ones the menu partials do not provide. One
+		// missing id throws during setup and kills every interaction, while
+		// the diagram still renders -- close to undiagnosable from the UI.
+		for (const id of [
+			'colb',
+			'colb-container',
+			'loading-overlay',
+			'popup',
+			'editor',
+			'version',
+			'version-panel'
+		]) {
 			assert.ok(html.includes(`id="${id}"`), `missing #${id}`);
 		}
+	});
+
+	test('loads the scripts in the order the frontend requires', () => {
+		const srcs = [...html.matchAll(/<script nonce="[^"]*" src="([^"]+)"><\/script>/g)].map(
+			(m) => m[1]
+		);
+
+		assert.deepStrictEqual(srcs, [
+			...ASSETS.vendorScriptUris,
+			...ASSETS.shimUris,
+			...ASSETS.scriptSrcs,
+			ASSETS.bootUri
+		]);
+	});
+
+	test('defines the editor shim before the app script that dereferences ace', () => {
+		// script.js runs `ace.require("ace/range").Range` at load time, so a
+		// later editorShim throws while script.js is still being parsed.
+		assert.ok(
+			html.indexOf('editorShim.js') < html.indexOf('static/script.js'),
+			'editorShim.js must precede script.js'
+		);
+	});
+
+	test('boots last, after every app script', () => {
+		// webviewInit.js assigns script.js's top-level `let editor`, a lexical
+		// binding only a classic script in the same scope can write.
+		assert.ok(
+			html.lastIndexOf('webviewInit.js') > html.lastIndexOf('static/activity.js'),
+			'webviewInit.js must come last'
+		);
+	});
+
+	test('hands the fetch shim the sidecar address and token', () => {
+		assert.ok(html.includes(`window.__PLANTUML_API__ = "${ASSETS.base}"`), html.slice(0, 200));
+		assert.ok(html.includes(`window.__PLANTUML_TOKEN__ = "${SIDECAR.token}"`));
 	});
 });
