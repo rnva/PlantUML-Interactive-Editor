@@ -51,50 +51,70 @@ test/webviewContent.test.js.
 		#colb-container {
 			position: absolute;
 			inset: 0;
-			overflow: auto;
+			/* hidden, not auto: panzoom translates #colb, so a scrollbar here
+			   would fight the drag gesture. */
+			overflow: hidden;
 		}
 		#colb {
 			padding: 12px;
+			transform-origin: 0 0;
 		}
-		#error {
-			display: none;
+		#colb svg {
+			max-width: none;
+		}
+		/* The VS Code text editor is the source editor. #editor exists only
+		   because hover-highlight.js reads editor.container, and #version /
+		   #version-panel only because script.js registers a document click
+		   handler that dereferences them. */
+		#editor, #version, #version-panel {
+			display: none !important;
+		}
+		#popup {
+			visibility: hidden;
+			position: absolute;
+			top: 0;
+			left: 0;
+			right: 0;
+			z-index: 5000;
+			padding: 8px 12px;
+			background: var(--vscode-inputValidation-errorBackground);
 			color: var(--vscode-errorForeground);
+			border-bottom: 1px solid var(--vscode-inputValidation-errorBorder);
 			white-space: pre-wrap;
-			padding: 12px;
 			font-family: var(--vscode-editor-font-family);
+			font-size: 12px;
+		}
+		#loading-overlay {
+			display: none;
+			position: absolute;
+			inset: 0;
+			background: rgba(0, 0, 0, 0.08);
+			z-index: 4000;
 		}
 	</style>
 </head>
 <body>
-	<div id="error"></div>
+	<!-- The seven ids the app's code dereferences without a null check and that
+	     the menu partials do not supply. One missing id throws during setup and
+	     kills every interaction while the diagram still renders. -->
+	<div id="popup">Error message</div>
+	<div id="editor"></div>
+	<span id="version"></span>
+	<div id="version-panel"></div>
 
-	<!-- #colb is the web app's own id for the diagram surface, so the stylesheet
-	     served by the sidecar applies to it unchanged. -->
 	<div id="colb-container">
 		<div id="colb"></div>
+		<div id="loading-overlay"></div>
 	</div>
 
 {{menus}}
 
 	<script nonce="{{nonce}}">
-		const diagramEl = document.getElementById('colb');
-		const containerEl = document.getElementById('colb-container');
-		const errorEl = document.getElementById('error');
-
-		window.addEventListener('message', (event) => {
-			const message = event.data;
-
-			if (message.type === 'updateDiagram') {
-				errorEl.style.display = 'none';
-				errorEl.textContent = '';
-				containerEl.style.display = 'block';
-				diagramEl.innerHTML = message.svg;
-			} else if (message.type === 'renderError') {
-				containerEl.style.display = 'none';
-				errorEl.style.display = 'block';
-				errorEl.textContent = message.message;
-			}
-		});
+		// Read by fetchShim.js, which every relative fetch() in the app's code
+		// goes through.
+		window.__PLANTUML_API__ = {{apiBase}};
+		window.__PLANTUML_TOKEN__ = {{token}};
 	</script>
+{{scripts}}
 </body>
 </html>

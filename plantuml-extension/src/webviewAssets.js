@@ -51,13 +51,46 @@ const MENUS_PATH = 'webview/menus';
 // something is wrong rather than merely busy.
 const MENUS_TIMEOUT_MS = 5000;
 
+// Sidecar-relative, and ordered: script.js declares the `let editor` binding
+// and the render pipeline the rest hang off, and activity.js registers the
+// handlers that assume both. Deliberately excludes static/mode-plantuml.js --
+// that is Ace's syntax mode, and the VS Code editor is the source editor here.
+const APP_SCRIPTS = [
+	'static/script.js',
+	'static/title.js',
+	'static/hover-highlight.js',
+	'static/sequence-message.js',
+	'static/sequence-activation.js',
+	'static/sequence-group.js',
+	'static/sequence-box.js',
+	'static/sequence-operations.js',
+	'static/activity.js'
+];
+
 // Just the entry point: styles.css @imports six files from static/css/, and
 // over HTTP those resolve against the sidecar origin on their own.
 const APP_STYLES = ['static/styles.css'];
 
-// node_modules-relative. Bootstrap's stylesheet, which the menu markup's
-// classes come from.
+// node_modules-relative. jQuery before Bootstrap, which requires it. jQuery is
+// pinned to 3.x because Bootstrap 4 requires <4.
+const VENDOR_SCRIPTS = [
+	'jquery/dist/jquery.min.js',
+	'bootstrap/dist/js/bootstrap.min.js',
+	'panzoom/dist/panzoom.min.js',
+	'diff/dist/diff.min.js'
+];
+
 const VENDOR_STYLES = ['bootstrap/dist/css/bootstrap.min.css'];
+
+// media/-relative, and the one part of the frontend that is genuinely this
+// extension's: VS Code has no Ace and no same-origin Flask, so these adapt the
+// app's code to it. Order is load-bearing -- see SHIM_SCRIPTS' use below.
+const SHIM_SCRIPTS = ['fetchShim.js', 'editorShim.js'];
+
+// Loaded after every app script, because it assigns script.js's top-level
+// `let editor`, a lexical binding only a classic script in the same global
+// scope can write to.
+const BOOT_SCRIPT = 'webviewInit.js';
 
 /** Thrown when the frontend cannot be resolved from a running sidecar. */
 class AssetLoadError extends Error {}
@@ -77,17 +110,25 @@ function vendorRoot(extensionPath) {
 }
 
 /**
- * @param {import('vscode').Webview} webview
+ * The media directory, for `localResourceRoots`. Holds the shims.
+ *
  * @param {string} extensionPath
- * @param {string[]} relatives node_modules-relative paths
+ * @returns {import('vscode').Uri}
+ */
+function mediaRoot(extensionPath) {
+	return vscode.Uri.file(path.join(extensionPath, 'media'));
+}
+
+/**
+ * @param {import('vscode').Webview} webview
+ * @param {import('vscode').Uri} root
+ * @param {string[]} relatives paths below `root`
  * @returns {string[]} webview-loadable URIs
  */
-function vendorUris(webview, extensionPath, relatives) {
+function localUris(webview, root, relatives) {
 	return relatives.map((relative) =>
 		webview
-			.asWebviewUri(
-				vscode.Uri.file(path.join(extensionPath, 'node_modules', ...relative.split('/')))
-			)
+			.asWebviewUri(vscode.Uri.joinPath(root, ...relative.split('/')))
 			.toString()
 	);
 }
@@ -149,7 +190,11 @@ function withTrailingSlash(url) {
  *   base: string,
  *   origin: string,
  *   styleHrefs: string[],
+ *   scriptSrcs: string[],
  *   vendorStyleUris: string[],
+ *   vendorScriptUris: string[],
+ *   shimUris: string[],
+ *   bootUri: string,
  *   menusHtml: string
  * }>}
  * @throws {AssetLoadError}
@@ -162,11 +207,18 @@ async function resolveWebviewAssets({ sidecar, webview, extensionPath }) {
 		(await vscode.env.asExternalUri(vscode.Uri.parse(sidecar.baseUrl))).toString()
 	);
 
+	const vendor = vendorRoot(extensionPath);
+	const media = mediaRoot(extensionPath);
+
 	return {
 		base,
 		origin: new URL(base).origin,
 		styleHrefs: APP_STYLES.map((relative) => `${base}${relative}`),
-		vendorStyleUris: vendorUris(webview, extensionPath, VENDOR_STYLES),
+		scriptSrcs: APP_SCRIPTS.map((relative) => `${base}${relative}`),
+		vendorStyleUris: localUris(webview, vendor, VENDOR_STYLES),
+		vendorScriptUris: localUris(webview, vendor, VENDOR_SCRIPTS),
+		shimUris: localUris(webview, media, SHIM_SCRIPTS),
+		bootUri: localUris(webview, media, [BOOT_SCRIPT])[0],
 		menusHtml: await fetchMenus(base, sidecar.token)
 	};
 }
@@ -206,8 +258,13 @@ module.exports = {
 	resolveWebviewAssets,
 	buildCsp,
 	vendorRoot,
+	mediaRoot,
 	fetchMenus,
 	AssetLoadError,
+	APP_SCRIPTS,
+	VENDOR_SCRIPTS,
 	VENDOR_STYLES,
+	SHIM_SCRIPTS,
+	BOOT_SCRIPT,
 	MENUS_PATH
 };

@@ -27,4 +27,24 @@ export default [{
         "constructor-super": "warn",
         "valid-typeof": "warn",
     },
+}, {
+    // media/ runs in the webview, not in Node: browser globals, plus the
+    // webview API and the frontend's own top-level bindings, which the shims
+    // deliberately reach for. `editor` is script.js's `let editor` -- assigning
+    // it is the entire point of webviewInit.js.
+    files: ["media/*.js"],
+    languageOptions: {
+        globals: {
+            ...globals.browser,
+            acquireVsCodeApi: "readonly",
+            panzoom: "readonly",
+            editor: "writable",
+            renderPlantUml: "readonly",
+            debouncedRenderPlantUml: "readonly",
+            clearMarkers: "readonly",
+            cursorChangeListener: "readonly",
+            initEditorHoverHighlighting: "readonly",
+            titleEventListeners: "readonly",
+        },
+    },
 }];
